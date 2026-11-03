@@ -24,17 +24,29 @@ def _get(path: str, retries: int = 3):
 
 def discovery_addresses() -> list[str]:
     data = _get("/token-profiles/latest/v1")
-    if not isinstance(data, list):
-        return []
     out = []
-    for row in data:
-        if row.get("chainId") != "solana":
-            continue
-        address = row.get("tokenAddress")
-        if address and address not in out:
-            out.append(address)
-        if len(out) >= 30:
-            break
+    if isinstance(data, list):
+        for row in data:
+            if row.get("chainId") != "solana":
+                continue
+            address = row.get("tokenAddress")
+            if address and address not in out:
+                out.append(address)
+            if len(out) >= 30:
+                break
+    try:
+        pump = requests.get(
+            "https://frontend-api.pump.fun/coins",
+            params={"offset": 0, "limit": 20, "sort": "created_timestamp", "order": "DESC", "includeNsfw": "false"},
+            timeout=15,
+        )
+        if pump.status_code == 200:
+            for row in pump.json():
+                address = row.get("mint")
+                if address and address not in out:
+                    out.append(address)
+    except (requests.RequestException, ValueError):
+        pass
     return out
 
 

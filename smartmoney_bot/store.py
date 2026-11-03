@@ -20,6 +20,15 @@ CREATE TABLE IF NOT EXISTS signals (
     reason TEXT,
     created_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS paper_calls (
+    token TEXT PRIMARY KEY,
+    symbol TEXT,
+    entry_mcap REAL,
+    size_usd REAL,
+    status TEXT,
+    opened_at TEXT
+);
 """
 
 

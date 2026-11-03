@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import os
 
 import requests
@@ -20,12 +21,15 @@ def send(text: str) -> None:
     )
 
 
-def format_signal(pair: dict, reason: str) -> str:
-    lines = [
-        f"{pair['symbol']} | watch",
-        f"mcap ${pair['mcap']:,.0f} | liq ${pair['liquidity_usd']:,.0f} | vol1h ${pair['volume_h1']:,.0f}",
-        f"gate: {reason}",
-    ]
-    if pair.get("url"):
-        lines.append(pair["url"])
-    return "\n".join(lines)
+def format_call(pair: dict, checks: dict) -> str:
+    now = datetime.now(timezone.utc).strftime("%b %d, %H:%M UTC")
+    return "\n".join([
+        f"NEW CALL | ${pair['symbol']}",
+        f"Market cap: ${pair['mcap']:,.0f}",
+        f"Called at: {now}",
+        f"CA: {pair['token']}",
+        f"holders: {checks.get('holders') if checks.get('holders') is not None else 'n/a'}",
+        f"mint revoked: {checks.get('mint_revoked')} | freeze revoked: {checks.get('freeze_revoked')}",
+        "paper $20 | NFA. DYOR.",
+        pair.get("url") or "",
+    ])

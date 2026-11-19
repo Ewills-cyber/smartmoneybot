@@ -247,14 +247,19 @@ def format_verdict(result: dict) -> str:
     return "\n".join(lines)
 
 
-def token_keyboard(chain: str, address: str) -> dict:
-    """Inline keyboard: paper buy sizes plus outbound quick-buy links."""
+def token_keyboard(chain: str, address: str, sizes: tuple[float, float, float] | None = None) -> dict:
+    """Inline keyboard: paper buy sizes plus outbound quick-buy links.
+
+    Callbacks are b1/b2/b3 so each tap spends that user's saved size, even on
+    a broadcast where the label was built for one chat.
+    """
     chain = chain or "solana"
+    amounts = sizes or (25.0, 50.0, 100.0)
     rows = [
         [
-            {"text": "Buy $25", "callback_data": f"b25:{address}"},
-            {"text": "Buy $50", "callback_data": f"b50:{address}"},
-            {"text": "Buy $100", "callback_data": f"b100:{address}"},
+            {"text": f"Buy ${amounts[0]:g}", "callback_data": f"b1:{address}"},
+            {"text": f"Buy ${amounts[1]:g}", "callback_data": f"b2:{address}"},
+            {"text": f"Buy ${amounts[2]:g}", "callback_data": f"b3:{address}"},
         ]
     ]
     links = quick_buy_links(chain, address)
@@ -304,6 +309,7 @@ def main_menu() -> dict:
                 {"text": "😬 Fumbles", "callback_data": "menu:fumbles"},
                 {"text": "❓ Help", "callback_data": "menu:help"},
             ],
+            [{"text": "⚙️ Settings", "callback_data": "menu:settings"}],
         ]
     }
 

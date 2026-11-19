@@ -12,6 +12,138 @@ from .store import db
 
 STARTING_CASH = 1000.0
 COPY_USD = 50.0
+SETTING_FIELDS = ("buy_a", "buy_b", "buy_c", "tp_multiple", "sl_multiple", "copy_usd")
+SETTING_DEFAULTS = {
+    "buy_a": 25.0,
+    "buy_b": 50.0,
+    "buy_c": 100.0,
+    "tp_multiple": 2.0,
+    "sl_multiple": 0.5,
+    "copy_usd": 50.0,
+}
+
+
+def parse_setting_number(text: str) -> float | None:
+    raw = (text or "").strip().lower().replace("$", "").replace(",", "").rstrip("x")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def validate_setting(field: str, value: float, cash_usd: float) -> tuple[bool, str]:
+    """TP must be above 1x, stop-loss between 0 and 1, and sizes must fit the cash on hand."""
+    if field not in SETTING_FIELDS:
+        return False, "Unknown setting."
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False, "Send a number."
+    if field == "tp_multiple":
+        if number <= 1:
+            return False, "Take profit has to be above 1x."
+        return True, "ok"
+    if field == "sl_multiple":
+        if number <= 0 or number >= 1:
+            return False, "Stop loss has to be above 0 and below 1x."
+        return True, "ok"
+    if number <= 0:
+        return False, "Size has to be above 0."
+    if number > float(cash_usd):
+        return False, f"That is above the paper cash (${float(cash_usd):.2f})."
+    return True, "ok"
+
+
+def user_settings(chat_id) -> dict:
+    user = get_subscriber(chat_id)
+    settings = dict(SETTING_DEFAULTS)
+    if not user:
+        settings["cash_usd"] = 0.0
+        return settings
+    for field, default in SETTING_DEFAULTS.items():
+        value = user.get(field)
+        settings[field] = float(value) if value is not None else default
+    settings["cash_usd"] = float(user.get("cash_usd") or 0)
+    return settings
+
+
+def apply_setting(chat_id, field: str, value: float) -> dict:
+    cid = str(chat_id)
+    if get_subscriber(cid) is None:
+        return {"ok": False, "error": "Send /start first."}
+    current = user_settings(cid)
+    ok, reason = validate_setting(field, value, current["cash_usd"])
+    if not ok:
+        return {"ok": False, "error": reason, "settings": current}
+    with db() as conn:
+        conn.execute(f"UPDATE subscribers SET {field} = ? WHERE chat_id = ?", (float(value), cid))
+    return {"ok": True, "settings": user_settings(cid)}
+
+
+def settings_text(chat_id) -> str:
+    user = get_subscriber(chat_id)
+    if not user:
+        return "Send /start first."
+    prefs = user_settings(chat_id)
+    return "\n".join(
+        [
+            "<b>Trade settings</b>",
+            f"Paper cash: {fmt_usd(prefs['cash_usd'])}",
+            f"Buy buttons: {fmt_usd(prefs['buy_a'])} · {fmt_usd(prefs['buy_b'])} · {fmt_usd(prefs['buy_c'])}",
+            f"Take profit: {prefs['tp_multiple']:g}x",
+            f"Stop loss: {prefs['sl_multiple']:g}x",
+            f"Copy-trade size: {fmt_usd(prefs['copy_usd'])}",
+            "These apply to new paper buys. Open positions keep the exits they were opened with.",
+            "Tap a preset, or tap Type to send a number.",
+        ]
+    )
+
+
+def settings_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Buy1 $10", "callback_data": "stg:buy_a:10"},
+                {"text": "$25", "callback_data": "stg:buy_a:25"},
+                {"text": "$50", "callback_data": "stg:buy_a:50"},
+                {"text": "Type", "callback_data": "set:buy_a"},
+            ],
+            [
+                {"text": "Buy2 $25", "callback_data": "stg:buy_b:25"},
+                {"text": "$50", "callback_data": "stg:buy_b:50"},
+                {"text": "$100", "callback_data": "stg:buy_b:100"},
+                {"text": "Type", "callback_data": "set:buy_b"},
+            ],
+            [
+                {"text": "Buy3 $50", "callback_data": "stg:buy_c:50"},
+                {"text": "$100", "callback_data": "stg:buy_c:100"},
+                {"text": "$250", "callback_data": "stg:buy_c:250"},
+                {"text": "Type", "callback_data": "set:buy_c"},
+            ],
+            [
+                {"text": "TP 1.5x", "callback_data": "stg:tp_multiple:1.5"},
+                {"text": "2x", "callback_data": "stg:tp_multiple:2"},
+                {"text": "3x", "callback_data": "stg:tp_multiple:3"},
+                {"text": "5x", "callback_data": "stg:tp_multiple:5"},
+                {"text": "Type", "callback_data": "set:tp_multiple"},
+            ],
+            [
+                {"text": "SL 0.3x", "callback_data": "stg:sl_multiple:0.3"},
+                {"text": "0.5x", "callback_data": "stg:sl_multiple:0.5"},
+                {"text": "0.7x", "callback_data": "stg:sl_multiple:0.7"},
+                {"text": "Type", "callback_data": "set:sl_multiple"},
+            ],
+            [
+                {"text": "Copy $25", "callback_data": "stg:copy_usd:25"},
+                {"text": "$50", "callback_data": "stg:copy_usd:50"},
+                {"text": "$100", "callback_data": "stg:copy_usd:100"},
+                {"text": "Type", "callback_data": "set:copy_usd"},
+            ],
+            [{"text": "« Menu", "callback_data": "menu:home"}],
+        ]
+    }
 
 
 def referral_code(chat_id) -> str:
@@ -147,11 +279,26 @@ def alerts_keyboard() -> dict:
     }
 
 
-def paper_buy(chat_id, token: str, symbol: str, chain: str, price: float, mcap: float, usd: float, tp: float = 2.0, sl: float = 0.5) -> dict:
+def paper_buy(
+    chat_id,
+    token: str,
+    symbol: str,
+    chain: str,
+    price: float,
+    mcap: float,
+    usd: float,
+    tp: float | None = None,
+    sl: float | None = None,
+) -> dict:
     cid = str(chat_id)
     user = get_subscriber(cid)
     if not user:
         return {"ok": False, "error": "Send /start first."}
+    prefs = user_settings(cid)
+    if tp is None:
+        tp = prefs["tp_multiple"]
+    if sl is None:
+        sl = prefs["sl_multiple"]
     if usd <= 0 or price <= 0:
         return {"ok": False, "error": "Price is not available yet."}
     if float(user["cash_usd"] or 0) < usd:
@@ -402,10 +549,11 @@ def copy_paper_buys(buys: list[dict], prices: dict) -> list[tuple[str, str]]:
                 quote.get("chain") or "solana",
                 price,
                 mcap,
-                COPY_USD,
+                user_settings(chat_id)["copy_usd"],
             )
             if result.get("ok"):
-                notes.append((chat_id, f"👀 <b>Copy buy</b> ${esc(quote.get('symbol') or '?')} paper ${COPY_USD:.0f}"))
+                spent = user_settings(chat_id)["copy_usd"]
+                notes.append((chat_id, f"👀 <b>Copy buy</b> ${esc(quote.get('symbol') or '?')} paper ${spent:.0f}"))
     return notes
 
 

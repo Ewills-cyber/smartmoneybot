@@ -225,14 +225,15 @@ def send(
         chat_ids = _audience(kind or infer_kind(text))
         if not chat_ids and cfg is not None:
             chat_ids = list(cfg.get("telegram_chat_ids") or [])
-    if reply_markup is None and "NEW CALL" in str(text):
-        reply_markup = _call_keyboard(str(text))
     if not token or not chat_ids:
         log.info("alert (no telegram):\n%s", _plain(text))
         return False
     ok = True
     for chat in chat_ids:
-        if not _deliver(token, chat, text, session=session, reply_markup=reply_markup):
+        markup = reply_markup
+        if markup is None and "NEW CALL" in str(text):
+            markup = _call_keyboard(str(text), chat)
+        if not _deliver(token, chat, text, session=session, reply_markup=markup):
             ok = False
     return ok
 
@@ -250,7 +251,7 @@ def _audience(kind: str) -> list[str]:
     return subscriber_ids("all")
 
 
-def _call_keyboard(text: str):
+def _call_keyboard(text: str, chat_id=None):
     import re
 
     from .safety import token_keyboard
@@ -260,7 +261,14 @@ def _call_keyboard(text: str):
         return None
     address = match.group(1).strip()
     chain = "base" if address.startswith("0x") else "solana"
-    return token_keyboard(chain, address)
+    sizes = None
+    if chat_id is not None:
+        from .community import get_subscriber, user_settings
+
+        if get_subscriber(chat_id) is not None:
+            prefs = user_settings(chat_id)
+            sizes = (prefs["buy_a"], prefs["buy_b"], prefs["buy_c"])
+    return token_keyboard(chain, address, sizes)
 
 
 def _deliver(token: str, chat: str, text: str, session=None, attempts: int = 3, reply_markup: dict | None = None) -> bool:

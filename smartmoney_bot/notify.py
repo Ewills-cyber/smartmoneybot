@@ -151,6 +151,18 @@ def format_milestone(position: dict, rung: str, multiple: float, now_mcap: float
     )
 
 
+def format_trade(side: str, symbol: str | None, token: str, status: str, detail: str) -> str:
+    title = "LIVE BUY" if side == "buy" else "LIVE SELL"
+    return "\n".join(
+        [
+            f"<b>{title}</b> ${esc(symbol or '?')}",
+            f"Status: {esc(status)}",
+            esc(detail),
+            f"CA: <code>{esc(token)}</code>",
+        ]
+    )
+
+
 def format_close(position: dict, reason: str, multiple: float | None, now_mcap: float | None) -> str:
     titles = {
         "take_profit": "TAKE PROFIT",

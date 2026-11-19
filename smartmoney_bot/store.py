@@ -36,7 +36,30 @@ CREATE TABLE IF NOT EXISTS paper_calls (
     pnl_sol REAL,
     source TEXT,
     last_mcap REAL,
-    pair TEXT
+    pair TEXT,
+    mode TEXT,
+    order_id TEXT,
+    tx_hash TEXT,
+    strategy_order_id TEXT,
+    exit_owner TEXT,
+    exit_order_id TEXT,
+    exit_reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS fills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token TEXT,
+    symbol TEXT,
+    side TEXT,
+    mode TEXT,
+    order_id TEXT,
+    tx_hash TEXT,
+    status TEXT,
+    size_sol REAL,
+    input_amount TEXT,
+    output_amount TEXT,
+    error TEXT,
+    created_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -74,6 +97,13 @@ PAPER_EXTRA = (
     ("source", "TEXT"),
     ("last_mcap", "REAL"),
     ("pair", "TEXT"),
+    ("mode", "TEXT"),
+    ("order_id", "TEXT"),
+    ("tx_hash", "TEXT"),
+    ("strategy_order_id", "TEXT"),
+    ("exit_owner", "TEXT"),
+    ("exit_order_id", "TEXT"),
+    ("exit_reason", "TEXT"),
 )
 
 
@@ -193,8 +223,17 @@ def known_tokens(conn: sqlite3.Connection) -> set[str]:
 
 
 def open_positions(conn: sqlite3.Connection) -> list[dict]:
-    rows = conn.execute("SELECT * FROM paper_calls WHERE status = 'open' ORDER BY opened_at").fetchall()
+    rows = conn.execute(
+        "SELECT * FROM paper_calls WHERE status IN ('open', 'pending') ORDER BY opened_at"
+    ).fetchall()
     return [dict(row) for row in rows]
+
+
+def exposure_count(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM paper_calls WHERE status IN ('open', 'pending')"
+    ).fetchone()
+    return int(row["n"])
 
 
 def open_position(
@@ -205,14 +244,21 @@ def open_position(
     size_usd: float | None,
     source: str,
     now: datetime,
+    status: str = "open",
+    mode: str = "paper",
+    order_id: str | None = None,
+    tx_hash: str | None = None,
+    strategy_order_id: str | None = None,
+    exit_owner: str = "bot",
 ) -> bool:
     conn.execute(
         """
         INSERT INTO paper_calls (
             token, symbol, entry_mcap, size_usd, size_sol, status, opened_at,
-            milestones, source, last_mcap, pair
+            milestones, source, last_mcap, pair, mode, order_id, tx_hash,
+            strategy_order_id, exit_owner
         )
-        VALUES (?, ?, ?, ?, ?, 'open', ?, '', ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(token) DO NOTHING
         """,
         (
@@ -221,13 +267,60 @@ def open_position(
             pair.get("mcap"),
             size_usd,
             size_sol,
+            status,
             now.isoformat(),
             source,
             pair.get("mcap"),
             pair.get("pair"),
+            mode,
+            order_id,
+            tx_hash,
+            strategy_order_id,
+            exit_owner,
         ),
     )
     return _changed(conn) == 1
+
+
+def record_fill(
+    conn: sqlite3.Connection,
+    *,
+    token: str,
+    symbol: str | None,
+    side: str,
+    mode: str,
+    status: str,
+    now: datetime,
+    order_id: str | None = None,
+    tx_hash: str | None = None,
+    size_sol: float | None = None,
+    input_amount: str | None = None,
+    output_amount: str | None = None,
+    error: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO fills (
+            token, symbol, side, mode, order_id, tx_hash, status, size_sol,
+            input_amount, output_amount, error, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            token,
+            symbol,
+            side,
+            mode,
+            order_id,
+            tx_hash,
+            status,
+            size_sol,
+            input_amount,
+            output_amount,
+            (error or "")[:300],
+            now.isoformat(),
+        ),
+    )
 
 
 def daily_loss_sol(conn: sqlite3.Connection, now: datetime) -> float:
@@ -293,5 +386,7 @@ def recent_signals(conn: sqlite3.Connection, *, decision: str | None = None, lim
 def count_signals(conn: sqlite3.Connection) -> dict:
     total = conn.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"]
     watches = conn.execute("SELECT COUNT(*) AS n FROM signals WHERE decision = 'watch'").fetchone()["n"]
-    opens = conn.execute("SELECT COUNT(*) AS n FROM paper_calls WHERE status = 'open'").fetchone()["n"]
+    opens = conn.execute(
+        "SELECT COUNT(*) AS n FROM paper_calls WHERE status IN ('open', 'pending')"
+    ).fetchone()["n"]
     return {"signals": total, "watches": watches, "open": opens}

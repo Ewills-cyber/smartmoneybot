@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 
 _SECRET_QUERY = {"api-key", "api_key", "apikey", "key", "token"}
 _BOT_PATH = re.compile(r"/bot[^/?#]+")
+_PEM_BLOCK = re.compile(r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", re.DOTALL)
 
 
 class ApiError(RuntimeError):
@@ -22,14 +23,22 @@ class ApiError(RuntimeError):
 
 
 def redact(text: str) -> str:
-    """Remove bot tokens and query secrets from a log line."""
+    """Remove bot tokens, API keys, signatures, and PEM blocks from a log line."""
     cleaned = _BOT_PATH.sub("/bot<redacted>", str(text))
-    return re.sub(
+    cleaned = _PEM_BLOCK.sub("-----BEGIN PRIVATE KEY-----REDACTED-----END PRIVATE KEY-----", cleaned)
+    cleaned = re.sub(
         r"(api-key|api_key|apikey|key|token)=([^&\s]+)",
         r"\1=REDACTED",
         cleaned,
         flags=re.IGNORECASE,
     )
+    cleaned = re.sub(
+        r"((?:X-APIKEY|X-Signature)['\"]?\s*[:=]\s*)\S+",
+        r"\1REDACTED",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned
 
 
 def safe_url(url: str) -> str:

@@ -30,3 +30,11 @@ services:
         value: "1"
       - key: REQUIRE_CLUSTER
         value: "0"
+      - key: TRADE_MODE
+        value: paper
+      - key: GMGN_API_KEY
+        sync: false
+      - key: GMGN_PRIVATE_KEY
+        sync: false
+      - key: GMGN_WALLET
+        sync: false

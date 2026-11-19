@@ -13,19 +13,22 @@ import requests
 from . import checks, market
 from .cluster import collect_buys, find_clusters
 from .gate import hard_filter, passes
+from .gmgn import GmgnClient, TradeResult, entry_decision, should_submit_sell
 from .http import redact, safe_url
-from .notify import format_call, format_close, format_milestone, send
-from .paper import can_open, evaluate_position, milestone_set, pnl_sol, pnl_usd, position_size
+from .notify import format_call, format_close, format_milestone, format_trade, send
+from .paper import evaluate_position, milestone_set, pnl_sol, pnl_usd, position_size
 from .settings import SOLANA_MINT, load_settings
 from .store import (
     claim_alert,
     daily_loss_sol,
     db,
+    exposure_count,
     known_tokens,
     open_position,
     open_positions,
     paused,
     prune,
+    record_fill,
     record_signal,
     remember_signatures,
     seen_signatures,
@@ -39,18 +42,33 @@ _scan_lock = threading.Lock()
 _last_ping = 0.0
 
 
-def run_once(*, now: datetime | None = None, get=None, rpc_call=None, sender=None, check_token=None) -> dict:
+def run_once(
+    *,
+    now: datetime | None = None,
+    get=None,
+    rpc_call=None,
+    sender=None,
+    check_token=None,
+    trader=None,
+) -> dict:
     """Run a single scan. Overlapping scans return immediately."""
     if not _scan_lock.acquire(blocking=False):
         return {"skipped": True, "reason": "scan already running", "scanned": 0, "watches": 0, "open": 0}
     try:
-        return _run_once(now=now, get=get, rpc_call=rpc_call, sender=sender, check_token=check_token)
+        return _run_once(
+            now=now,
+            get=get,
+            rpc_call=rpc_call,
+            sender=sender,
+            check_token=check_token,
+            trader=trader,
+        )
     finally:
         _scan_lock.release()
 
 
 def serve(stop_flag: dict) -> None:
-    log.info("scanner started in paper mode")
+    log.info("scanner started in %s mode", cfg.get("trade_mode", "paper"))
     cfg = load_settings()
     if cfg.get("enable_profile_stream"):
         try:
@@ -74,25 +92,35 @@ def serve(stop_flag: dict) -> None:
             time.sleep(1)
 
 
-def _run_once(*, now, get, rpc_call, sender, check_token) -> dict:
+def _run_once(*, now, get, rpc_call, sender, check_token, trader=None) -> dict:
     cfg = load_settings()
     moment = now or datetime.now(timezone.utc)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     fetch = get or market.default_get
     maybe_keep_awake(cfg)
-
-    if paused():
-        summary = {"paused": True, "scanned": 0, "watches": 0, "open": 0, "clusters": 0}
-        _save_summary(summary, moment)
-        return summary
+    is_paused = paused()
 
     with db() as conn:
         opens = open_positions(conn)
         known = known_tokens(conn)
         seen = seen_signatures(conn)
-        open_count = len(opens)
+        open_count = exposure_count(conn)
         loss = daily_loss_sol(conn, moment)
+
+    if is_paused and open_count == 0:
+        summary = {"paused": True, "scanned": 0, "watches": 0, "open": 0, "clusters": 0}
+        _save_summary(summary, moment)
+        return summary
+
+    active_trader = trader if cfg.get("trade_mode") == "live" else None
+    if cfg.get("trade_mode") == "live" and active_trader is None and cfg.get("gmgn_ready"):
+        active_trader = GmgnClient(cfg)
+    messages: list[str] = []
+    if active_trader is not None:
+        opens, known, open_count, loss = _refresh_live_orders(
+            opens, known, open_count, loss, active_trader, moment, messages
+        )
 
     extra = [{"address": row["token"], "source": "open"} for row in opens if row.get("token")]
     stream = get_stream()
@@ -154,22 +182,65 @@ def _run_once(*, now, get, rpc_call, sender, check_token) -> dict:
             ok, reason, info, cluster = False, "check error", {}, cluster
         candidates.append({"pair": pair, "ok": ok, "reason": reason, "info": info, "cluster": cluster})
 
-    messages: list[str] = []
     watches = 0
+    plans = []
+    simulated_open = open_count
+    for item in candidates:
+        pair = item["pair"]
+        if not item["ok"]:
+            plans.append({"kind": "skip", "pair": pair, "reason": item["reason"], "item": item})
+            continue
+        kind, why = entry_decision(
+            cfg,
+            paused=is_paused,
+            open_count=simulated_open,
+            daily_loss=loss,
+        )
+        if kind == "skip":
+            plans.append({"kind": "skip", "pair": pair, "reason": why, "item": item})
+            continue
+        size_sol, size_usd = position_size(sol, cfg)
+        result = None
+        if kind == "live":
+            if active_trader is None:
+                plans.append({"kind": "skip", "pair": pair, "reason": "gmgn client unavailable", "item": item})
+                continue
+            try:
+                result = active_trader.buy(pair["token"], pair.get("symbol") or "?", size_sol)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("live buy crashed: %s", redact(exc))
+                result = TradeResult(ok=False, status="failed", error=redact(exc), retryable=True)
+        plans.append(
+            {
+                "kind": kind,
+                "pair": pair,
+                "reason": item["reason"],
+                "item": item,
+                "size_sol": size_sol,
+                "size_usd": size_usd,
+                "result": result,
+            }
+        )
+        if kind == "paper" or (result is not None and result.occupies_slot):
+            simulated_open += 1
+
+    sell_jobs: list[dict] = []
     with db() as conn:
-        for item in candidates:
-            pair = item["pair"]
+        for plan in plans:
+            pair = plan["pair"]
             token = pair["token"]
-            ok = item["ok"]
-            reason = item["reason"]
-            if not ok:
-                record_signal(conn, pair, "skip", reason, moment)
+            if plan["kind"] == "skip":
+                record_signal(conn, pair, "skip", plan["reason"], moment)
                 continue
-            allowed, why = can_open(open_count, loss, cfg)
-            if not allowed:
-                record_signal(conn, pair, "skip", why, moment)
+            if plan["kind"] == "live":
+                result = plan["result"]
+                _record_live_buy(conn, plan, result, origins, moment, messages, cfg)
+                if result is not None and (result.occupies_slot or (result.terminal and not result.retryable)):
+                    watches += 1 if result.ok else 0
                 continue
-            size_sol, size_usd = position_size(sol, cfg)
+            size_sol = plan["size_sol"]
+            size_usd = plan["size_usd"]
+            item = plan["item"]
             source = source_label(origins.get(token, set()), len(item["cluster"]))
             inserted = open_position(
                 conn,
@@ -181,9 +252,7 @@ def _run_once(*, now, get, rpc_call, sender, check_token) -> dict:
             )
             if not inserted:
                 continue
-            record_signal(conn, pair, "watch", reason, moment)
-            open_count += 1
-            known.add(token)
+            record_signal(conn, pair, "watch", plan["reason"], moment)
             watches += 1
             if claim_alert(conn, token, "call", moment):
                 position = {
@@ -197,6 +266,8 @@ def _run_once(*, now, get, rpc_call, sender, check_token) -> dict:
                 messages.append(format_call(pair, item["info"], position, item["cluster"], cfg))
 
         for position in open_positions(conn):
+            if position.get("status") != "open":
+                continue
             pair = best.get(position["token"])
             now_mcap = pair.get("mcap") if pair else None
             if now_mcap:
@@ -206,6 +277,33 @@ def _run_once(*, now, get, rpc_call, sender, check_token) -> dict:
                 )
             actions = evaluate_position(position, now_mcap, moment, cfg)
             milestones = milestone_set(position.get("milestones"))
+            if (position.get("mode") or "paper") == "live":
+                for action in actions:
+                    if action["type"] == "milestone":
+                        milestones.add(str(action["rung"]))
+                        if claim_alert(conn, position["token"], f"m{action['rung']}", moment):
+                            messages.append(
+                                format_milestone(position, str(action["rung"]), action["multiple"], now_mcap)
+                            )
+                        continue
+                    if should_submit_sell(position, action):
+                        sell_jobs.append(
+                            {
+                                "token": position["token"],
+                                "symbol": position.get("symbol"),
+                                "reason": action["reason"],
+                                "multiple": action.get("multiple"),
+                                "now_mcap": now_mcap,
+                                "position": position,
+                            }
+                        )
+                        break
+                if milestones != milestone_set(position.get("milestones")):
+                    conn.execute(
+                        "UPDATE paper_calls SET milestones = ? WHERE token = ?",
+                        (_join_milestones(milestones), position["token"]),
+                    )
+                continue
             closed = False
             for action in actions:
                 if action["type"] == "milestone":
@@ -246,10 +344,15 @@ def _run_once(*, now, get, rpc_call, sender, check_token) -> dict:
         if new_sigs:
             remember_signatures(conn, new_sigs)
         prune(conn, moment)
+
+    for job in sell_jobs:
+        _submit_live_sell(job, active_trader, moment, messages)
+
+    with db() as conn:
         open_now = conn.execute("SELECT COUNT(*) AS n FROM paper_calls WHERE status = 'open'").fetchone()["n"]
 
     summary = {
-        "paused": False,
+        "paused": is_paused,
         "scanned": len([token for token in best if token and token != SOLANA_MINT]),
         "watches": watches,
         "open": open_now,
@@ -264,6 +367,208 @@ def _run_once(*, now, get, rpc_call, sender, check_token) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.warning("alert delivery failed: %s", redact(exc))
     return summary
+
+
+def _refresh_live_orders(opens, known, open_count, loss, trader, moment: datetime, messages: list):
+    """Poll buy and exit orders that are still in flight."""
+    tracked = [
+        row
+        for row in opens
+        if (row.get("status") == "pending" and row.get("order_id")) or row.get("exit_order_id")
+    ]
+    if not tracked:
+        return opens, known, open_count, loss
+    from .store import daily_loss_sol as _loss
+
+    for row in tracked:
+        order_id = row.get("exit_order_id") or row.get("order_id")
+        try:
+            result = trader.refresh(order_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("order refresh failed: %s", redact(exc))
+            continue
+        with db() as conn:
+            note = _apply_refresh(conn, row, result, moment)
+        if note:
+            messages.append(note)
+    with db() as conn:
+        fresh = open_positions(conn)
+        return fresh, known_tokens(conn), exposure_count(conn), _loss(conn, moment)
+
+
+def _apply_refresh(conn, row: dict, result: TradeResult, moment: datetime) -> str | None:
+    token = row["token"]
+    record_fill(
+        conn,
+        token=token,
+        symbol=row.get("symbol"),
+        side="sell" if row.get("exit_order_id") else "buy",
+        mode="live",
+        status=result.status,
+        now=moment,
+        order_id=result.order_id or row.get("exit_order_id") or row.get("order_id"),
+        tx_hash=result.tx_hash,
+        error=result.error,
+    )
+    if row.get("exit_order_id"):
+        if result.ok:
+            conn.execute(
+                """
+                UPDATE paper_calls
+                SET status = COALESCE(exit_reason, 'sold'), closed_at = ?, tx_hash = COALESCE(?, tx_hash)
+                WHERE token = ? AND status = 'open'
+                """,
+                (moment.isoformat(), result.tx_hash, token),
+            )
+            return format_trade("sell", row.get("symbol"), token, result.status, "exit order confirmed")
+        if result.terminal:
+            conn.execute(
+                """
+                UPDATE paper_calls
+                SET status = 'exit_failed', closed_at = ?, tx_hash = COALESCE(?, tx_hash)
+                WHERE token = ? AND status = 'open'
+                """,
+                (moment.isoformat(), result.tx_hash, token),
+            )
+            return format_trade("sell", row.get("symbol"), token, result.status, result.error or "exit order failed")
+        return None
+    if result.ok:
+        conn.execute(
+            """
+            UPDATE paper_calls
+            SET status = 'open', tx_hash = COALESCE(?, tx_hash),
+                strategy_order_id = COALESCE(?, strategy_order_id)
+            WHERE token = ? AND status = 'pending'
+            """,
+            (result.tx_hash, result.strategy_order_id, token),
+        )
+        return format_trade("buy", row.get("symbol"), token, result.status, "order confirmed")
+    if result.terminal:
+        conn.execute(
+            """
+            UPDATE paper_calls
+            SET status = 'failed', closed_at = ?, tx_hash = COALESCE(?, tx_hash)
+            WHERE token = ? AND status = 'pending'
+            """,
+            (moment.isoformat(), result.tx_hash, token),
+        )
+        return format_trade("buy", row.get("symbol"), token, result.status, result.error or "order failed")
+    return None
+
+
+def _record_live_buy(conn, plan: dict, result: TradeResult | None, origins: dict, moment: datetime, messages: list, cfg: dict) -> None:
+    pair = plan["pair"]
+    token = pair["token"]
+    item = plan["item"]
+    if result is None:
+        record_signal(conn, pair, "skip", "live buy did not run", moment)
+        return
+    source = source_label(origins.get(token, set()), len(item.get("cluster") or []))
+    remember = result.occupies_slot or (result.terminal and not result.retryable)
+    status = "open" if result.ok else ("pending" if result.occupies_slot else "failed")
+    exit_owner = "gmgn" if result.strategy_order_id else "bot"
+    if remember:
+        inserted = open_position(
+            conn,
+            pair,
+            size_sol=plan["size_sol"],
+            size_usd=plan["size_usd"],
+            source=source,
+            now=moment,
+            status=status if status != "failed" else "failed",
+            mode="live",
+            order_id=result.order_id,
+            tx_hash=result.tx_hash,
+            strategy_order_id=result.strategy_order_id,
+            exit_owner=exit_owner,
+        )
+        if inserted and result.ok:
+            record_signal(conn, pair, "watch", plan["reason"], moment)
+    record_fill(
+        conn,
+        token=token,
+        symbol=pair.get("symbol"),
+        side="buy",
+        mode="live",
+        status=result.status,
+        now=moment,
+        order_id=result.order_id,
+        tx_hash=result.tx_hash,
+        size_sol=plan["size_sol"],
+        input_amount=result.input_amount,
+        output_amount=result.output_amount,
+        error=result.error,
+    )
+    detail = result.error or f"order {result.order_id or 'n/a'}"
+    if result.strategy_order_id:
+        detail += f" · tp/sl strategy {result.strategy_order_id}"
+    messages.append(format_trade("buy", pair.get("symbol"), token, result.status, detail))
+
+
+def _submit_live_sell(job: dict, trader, moment: datetime, messages: list) -> None:
+    token = job["token"]
+    if trader is None:
+        messages.append(format_trade("sell", job.get("symbol"), token, "failed", "gmgn client unavailable"))
+        return
+    try:
+        result = trader.sell(token, job.get("symbol") or "?", job["reason"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("live sell crashed: %s", redact(exc))
+        result = TradeResult(ok=False, status="failed", error=redact(exc), retryable=True)
+    with db() as conn:
+        record_fill(
+            conn,
+            token=token,
+            symbol=job.get("symbol"),
+            side="sell",
+            mode="live",
+            status=result.status,
+            now=moment,
+            order_id=result.order_id,
+            tx_hash=result.tx_hash,
+            error=result.error,
+        )
+        if result.ok:
+            gain = pnl_sol(job["position"].get("size_sol"), job.get("multiple"))
+            conn.execute(
+                """
+                UPDATE paper_calls
+                SET status = ?, closed_at = ?, exit_mcap = ?, exit_order_id = ?, exit_reason = ?,
+                    pnl_sol = ?, tx_hash = COALESCE(?, tx_hash)
+                WHERE token = ? AND status = 'open'
+                """,
+                (
+                    job["reason"],
+                    moment.isoformat(),
+                    job.get("now_mcap"),
+                    result.order_id,
+                    job["reason"],
+                    gain,
+                    result.tx_hash,
+                    token,
+                ),
+            )
+        elif result.order_id and not result.terminal:
+            conn.execute(
+                """
+                UPDATE paper_calls
+                SET exit_order_id = ?, exit_reason = ?, tx_hash = COALESCE(?, tx_hash)
+                WHERE token = ? AND status = 'open'
+                """,
+                (result.order_id, job["reason"], result.tx_hash, token),
+            )
+        elif result.terminal and not result.retryable:
+            conn.execute(
+                """
+                UPDATE paper_calls
+                SET status = 'exit_failed', closed_at = ?, exit_order_id = ?, exit_reason = ?
+                WHERE token = ? AND status = 'open'
+                """,
+                (moment.isoformat(), result.order_id, job["reason"], token),
+            )
+        if claim_alert(conn, token, f"sell-{job['reason']}-{result.status}", moment):
+            detail = result.error or f"order {result.order_id or 'n/a'}"
+            messages.append(format_trade("sell", job.get("symbol"), token, result.status, f"{job['reason']}: {detail}"))
 
 
 def source_label(tags: set[str], cluster_count: int) -> str:

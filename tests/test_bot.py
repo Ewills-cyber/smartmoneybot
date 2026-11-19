@@ -58,6 +58,11 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.delenv("REQUIRE_CLUSTER", raising=False)
     monkeypatch.delenv("MAX_OPEN_POSITIONS", raising=False)
     monkeypatch.delenv("SOLANA_RPC", raising=False)
+    monkeypatch.delenv("TRADE_MODE", raising=False)
+    monkeypatch.delenv("GMGN_API_KEY", raising=False)
+    monkeypatch.delenv("GMGN_PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("GMGN_WALLET", raising=False)
+    monkeypatch.delenv("GMGN_ALLOW_EPHEMERAL_DB", raising=False)
     reset_runtime_state()
     yield
 

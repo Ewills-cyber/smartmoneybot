@@ -75,6 +75,18 @@ def load_settings() -> dict:
     cfg["require_authorities"] = _bool("REQUIRE_AUTHORITIES", False)
     cfg["require_holders"] = _bool("REQUIRE_HOLDERS", False)
     cfg["chain"] = (os.environ.get("CHAIN") or "solana").strip().lower() or "solana"
+    cfg["trade_mode"] = _mode("TRADE_MODE")
+    cfg["gmgn_api_key"] = _blank("GMGN_API_KEY")
+    cfg["gmgn_private_key"] = _pem("GMGN_PRIVATE_KEY")
+    cfg["gmgn_wallet"] = _wallet("GMGN_WALLET")
+    cfg["gmgn_host"] = _blank("GMGN_HOST") or "https://openapi.gmgn.ai"
+    cfg["gmgn_slippage"] = _optional_int("GMGN_SLIPPAGE", low=0, high=100)
+    cfg["gmgn_anti_mev"] = _bool("GMGN_ANTI_MEV", True)
+    cfg["gmgn_priority_fee"] = _blank("GMGN_PRIORITY_FEE") or "0.00001"
+    cfg["gmgn_tip_fee"] = _blank("GMGN_TIP_FEE") or "0.00001"
+    cfg["gmgn_confirm_attempts"] = _clamp_int("GMGN_CONFIRM_ATTEMPTS", 3, low=1, high=6)
+    cfg["gmgn_live_storage_ok"] = _live_storage_ok()
+    cfg["gmgn_ready"] = bool(cfg["gmgn_api_key"] and cfg["gmgn_private_key"] and cfg["gmgn_wallet"])
 
     cfg["telegram_token"] = _blank("TELEGRAM_BOT_TOKEN")
     cfg["telegram_chat_ids"] = _chat_ids(os.environ.get("TELEGRAM_CHAT_ID", ""))
@@ -138,13 +150,70 @@ def public_config(cfg: dict) -> dict:
         "require_authorities",
         "require_holders",
         "discovery_limit",
+        "trade_mode",
     )
     shown = {key: cfg[key] for key in keys}
     shown["smart_wallets"] = len(cfg.get("smart_wallets") or [])
     shown["birdeye"] = bool(cfg.get("birdeye_api_key"))
     shown["helius"] = bool(cfg.get("helius_api_key"))
     shown["telegram"] = bool(cfg.get("telegram_token") and cfg.get("telegram_chat_ids"))
+    shown["gmgn"] = bool(cfg.get("gmgn_ready"))
     return shown
+
+
+def _live_storage_ok() -> bool:
+    """Live buys are refused on an ephemeral path unless explicitly overridden.
+
+    Render's free disk is wiped on restart. Forgetting an open buy would make
+    the next boot buy the same mint again.
+    """
+    if _bool("GMGN_ALLOW_EPHEMERAL_DB", False):
+        return True
+    from .store import db_path
+
+    path = str(db_path())
+    return not (path == "/tmp" or path.startswith("/tmp/") or path.startswith("/var/tmp/"))
+
+
+def _mode(name: str) -> str:
+    raw = (os.environ.get(name) or "paper").strip().lower()
+    if raw in _EMPTY:
+        return "paper"
+    if raw not in {"off", "paper", "live"}:
+        log.warning("TRADE_MODE %s is not off, paper, or live; using paper", raw)
+        return "paper"
+    return raw
+
+
+def _pem(name: str) -> str | None:
+    from .gmgn import normalize_pem
+
+    return normalize_pem(_blank(name))
+
+
+def _wallet(name: str) -> str | None:
+    raw = _blank(name)
+    if not raw:
+        return None
+    if not _WALLET_RE.match(raw):
+        log.warning("GMGN_WALLET is not a Solana address")
+        return None
+    return raw
+
+
+def _optional_int(name: str, *, low: int, high: int) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "" or raw.strip().lower() in _EMPTY:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("invalid %s=%r, ignoring it", name, raw)
+        return None
+    if value < low or value > high:
+        log.warning("%s=%s outside %s-%s, ignoring it", name, value, low, high)
+        return None
+    return value
 
 
 def _blank(name: str) -> str | None:

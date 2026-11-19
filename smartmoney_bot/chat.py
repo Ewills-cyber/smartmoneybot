@@ -54,9 +54,15 @@ def reply(text: str) -> str:
         return config_text()
     if command in {"/wallets", "wallets"}:
         return wallets_text()
+    if command == "/mode" or command.startswith("/mode "):
+        return mode_text()
     if command in {"/pause", "pause"}:
         set_paused(True)
-        return "Paused. Scanning stops until you send /resume. Open paper positions stay open."
+        return (
+            "Paused. No new buys until you send /resume. "
+            "Open positions can still be closed by their exits. "
+            "Live mode cannot be turned on from chat."
+        )
     if command in {"/resume", "resume"}:
         set_paused(False)
         return "Resumed. The next cycle will scan again."
@@ -71,14 +77,22 @@ def reply(text: str) -> str:
 
 
 def start_message() -> str:
+    mode = load_settings().get("trade_mode", "paper")
+    if mode == "live":
+        lead = "Trade mode is live. Buys that pass the gate can send a GMGN swap."
+    elif mode == "off":
+        lead = "Trade mode is off. I scan and report, and I do not open positions."
+    else:
+        lead = "Trade mode is paper. Alerts are paper calls, not swaps."
     return "\n".join(
         [
             "<b>Smartmoney bot</b>",
-            "I watch new Solana pairs and paper-trade the ones that pass the gate.",
-            "No wallet keys. No live swaps. Alerts are paper calls.",
+            "I watch new Solana pairs and trade the ones that pass the gate.",
+            lead,
             "",
             "Send /help for commands.",
             "Send /status to see the last scan.",
+            "Send /mode to see the trade mode. Live is enabled only with TRADE_MODE in the environment.",
         ]
     )
 
@@ -95,8 +109,9 @@ def help_message() -> str:
             "/scan — run one scan now",
             "/config — thresholds (no secrets)",
             "/wallets — watched smart-money wallets",
-            "/pause — stop scanning",
-            "/resume — scan again",
+            "/mode — show paper, off, or live. This does not switch to live.",
+            "/pause — stop new buys",
+            "/resume — allow new buys again",
             "",
             "Plain words work too: status, signals, scan.",
         ]
@@ -116,12 +131,18 @@ def status() -> str:
         stream_state = "starting"
     else:
         stream_state = "off"
+    if cfg["trade_mode"] == "live":
+        headline = "Live mode. GMGN swaps are enabled."
+    elif cfg["trade_mode"] == "off":
+        headline = "Trading is off."
+    else:
+        headline = "Paper mode. No live trades."
     lines = [
         "<b>Smartmoney bot</b>",
-        "Paper mode. No live trades.",
+        headline,
         f"Signals logged: {counts['signals']}",
         f"Call rows: {counts['watches']}",
-        f"Open paper positions: {counts['open']} / {cfg['max_open_positions']}",
+        f"Open positions: {counts['open']} / {cfg['max_open_positions']}",
         f"Daily closed loss: {loss:.4f} / {cfg['max_daily_loss_sol']} SOL",
         f"Last scan: {esc(get_meta('last_scan_at') or 'not yet')}",
         f"Paused: {'yes' if paused() else 'no'}",
@@ -181,6 +202,22 @@ def config_text() -> str:
     lines = ["<b>Config</b>"]
     for key, value in shown.items():
         lines.append(f"{esc(key)}: {esc(value)}")
+    return "\n".join(lines)
+
+
+def mode_text() -> str:
+    cfg = load_settings()
+    wallet = cfg.get("gmgn_wallet") or ""
+    shown = f"{wallet[:4]}…{wallet[-4:]}" if len(wallet) > 12 else (wallet or "missing")
+    lines = [
+        f"<b>Trade mode</b>: {esc(cfg.get('trade_mode', 'paper'))}",
+        "Live trading is enabled only by TRADE_MODE=live in the environment.",
+        "No chat command switches into live mode.",
+        f"GMGN API key: {'set' if cfg.get('gmgn_api_key') else 'missing'}",
+        f"GMGN signing key: {'set' if cfg.get('gmgn_private_key') else 'missing'}",
+        f"GMGN wallet: {esc(shown)}",
+        "/pause stops new buys. It does not cancel an order GMGN already accepted.",
+    ]
     return "\n".join(lines)
 
 

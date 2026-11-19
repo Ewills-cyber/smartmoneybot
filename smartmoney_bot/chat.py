@@ -77,6 +77,10 @@ def reply(text: str, chat_id=None, username: str | None = None) -> str:
         from .community import alerts_text
 
         return alerts_text(chat_id or "local")
+    if command in {"/settings", "settings"}:
+        from .community import settings_text
+
+        return settings_text(chat_id or "local")
     if command.startswith("/watch"):
         return _watch_command(text, chat_id)
     if command in {"/pause", "pause"}:
@@ -137,6 +141,7 @@ def help_message() -> str:
             "/leaderboard — realized paper PnL and your invite link",
             "/wallet — paper cash and open positions",
             "/alerts — toggle launch, smart-money, and pump alerts",
+            "/settings — paper buy sizes, take profit, stop loss, and copy size",
             "/mode — show paper, off, or live. This does not switch to live.",
             "/pause — stop new buys",
             "/resume — allow new buys again",
@@ -274,6 +279,17 @@ def format_summary(summary: dict) -> str:
     )
 
 
+def _buy_keyboard(chain: str, address: str, chat_id=None) -> dict:
+    from .community import get_subscriber, user_settings
+    from .safety import token_keyboard
+
+    sizes = None
+    if chat_id is not None and get_subscriber(chat_id) is not None:
+        prefs = user_settings(chat_id)
+        sizes = (prefs["buy_a"], prefs["buy_b"], prefs["buy_c"])
+    return token_keyboard(chain, address, sizes)
+
+
 def _user_positions(chat_id) -> str:
     from .community import wallet_text
 
@@ -306,20 +322,44 @@ def respond(text: str, chat_id=None, username: str | None = None) -> tuple[str, 
     from .safety import detect_address, format_verdict, main_menu, scan_address, token_keyboard
 
     command = normalize_command(text)
+    if command.startswith("/") and chat_id is not None:
+        set_meta(f"ui:{chat_id}", "")
     if chat_id is not None and command.startswith("/start"):
         from .community import register_subscriber
 
         register_subscriber(chat_id, username, text)
+    pending = get_meta(f"ui:{chat_id}") if chat_id is not None else None
+    if pending and str(pending).startswith("set:") and not command.startswith("/"):
+        from .community import apply_setting, parse_setting_number, settings_keyboard, settings_text
+
+        field = str(pending).split(":", 1)[1]
+        if text.strip().lower() in {"cancel", "stop"}:
+            set_meta(f"ui:{chat_id}", "")
+            return settings_text(chat_id), settings_keyboard()
+        number = parse_setting_number(text)
+        if number is None:
+            return "Send a number, or cancel.", settings_keyboard()
+        result = apply_setting(chat_id, field, number)
+        if result.get("ok"):
+            set_meta(f"ui:{chat_id}", "")
+        detail = "Saved." if result.get("ok") else result.get("error") or "Could not save that."
+        return detail + "\n\n" + settings_text(chat_id), settings_keyboard()
     address = detect_address(text.strip()) if not command.startswith("/") else None
     if address:
         if chat_id is not None:
             set_meta(f"ui:{chat_id}", "")
         card = scan_address(address)
-        return format_verdict(card), token_keyboard(card.get("chain") or "solana", address)
+        return format_verdict(card), _buy_keyboard(card.get("chain") or "solana", address, chat_id)
     if chat_id is not None and get_meta(f"ui:{chat_id}") == "wallet":
         return _watch_command(f"/watch {text}", chat_id), main_menu()
     body = reply(text, chat_id=chat_id, username=username)
-    markup = main_menu() if command.startswith("/start") or command in {"/help", "help"} else None
+    markup = None
+    if command.startswith("/start") or command in {"/help", "help"}:
+        markup = main_menu()
+    elif command in {"/settings", "settings"}:
+        from .community import settings_keyboard
+
+        markup = settings_keyboard()
     return body, markup
 
 
@@ -333,11 +373,15 @@ def handle_callback(data: str, chat_id, username: str | None = None) -> tuple[st
         paper_sell,
         positions_keyboard,
         register_subscriber,
+        settings_keyboard,
+        settings_text,
         toggle_alert,
+        user_settings,
         wallet_text,
         watch_text,
+        apply_setting,
     )
-    from .safety import main_menu, scan_address, token_keyboard
+    from .safety import main_menu, scan_address
 
     register_subscriber(chat_id, username)
     if data in {"menu:home", "menu:help"}:
@@ -359,9 +403,30 @@ def handle_callback(data: str, chat_id, username: str | None = None) -> tuple[st
     if data == "menu:watch":
         set_meta(f"ui:{chat_id}", "wallet")
         return watch_text(chat_id) + "\nSend a Solana address to watch it.", main_menu()
-    if data.startswith(("b25:", "b50:", "b100:")):
+    if data == "menu:settings":
+        return settings_text(chat_id), settings_keyboard()
+    if data.startswith("set:"):
+        set_meta(f"ui:{chat_id}", data)
+        prompts = {
+            "buy_a": "Buy button 1",
+            "buy_b": "Buy button 2",
+            "buy_c": "Buy button 3",
+            "tp_multiple": "Take profit multiple",
+            "sl_multiple": "Stop loss multiple",
+            "copy_usd": "Copy-trade size in USD",
+        }
+        field = data.split(":", 1)[1]
+        return f"Send a number for {prompts.get(field, field)}. Send cancel to stop.", settings_keyboard()
+    if data.startswith("stg:"):
+        _prefix, field, raw = data.split(":", 2)
+        result = apply_setting(chat_id, field, float(raw))
+        detail = "Saved." if result.get("ok") else result.get("error") or "Could not save that."
+        return detail + "\n\n" + settings_text(chat_id), settings_keyboard()
+    if data.startswith(("b1:", "b2:", "b3:", "b25:", "b50:", "b100:")):
         size_token, address = data.split(":", 1)
-        usd = {"b25": 25.0, "b50": 50.0, "b100": 100.0}[size_token]
+        prefs = user_settings(chat_id)
+        slots = {"b1": prefs["buy_a"], "b2": prefs["buy_b"], "b3": prefs["buy_c"]}
+        usd = slots[size_token] if size_token in slots else float(size_token[1:])
         card = scan_address(address)
         price = float(card.get("price") or 0)
         mcap = float(card.get("mcap") or 0)
@@ -376,8 +441,8 @@ def handle_callback(data: str, chat_id, username: str | None = None) -> tuple[st
         )
         chain = card.get("chain") or "solana"
         if not result.get("ok"):
-            return result.get("error") or "Paper buy failed.", token_keyboard(chain, address)
-        return f"Paper buy ${usd:.0f} of ${card.get('symbol') or '?'}.", token_keyboard(chain, address)
+            return result.get("error") or "Paper buy failed.", _buy_keyboard(chain, address, chat_id)
+        return f"Paper buy ${usd:.0f} of ${card.get('symbol') or '?'}.", _buy_keyboard(chain, address, chat_id)
     if data.startswith(("s50:", "s100:")):
         size_token, address = data.split(":", 1)
         percent = 50 if size_token == "s50" else 100
@@ -387,7 +452,7 @@ def handle_callback(data: str, chat_id, username: str | None = None) -> tuple[st
         result = paper_sell(chat_id, address, percent, price, mcap)
         if not result.get("ok"):
             return result.get("error") or "Paper sell failed.", main_menu()
-        return f"Paper sell {percent:.0f}% · pnl {result['pnl']:.2f} USD", token_keyboard(card.get("chain") or "solana", address)
+        return f"Paper sell {percent:.0f}% · pnl {result['pnl']:.2f} USD", _buy_keyboard(card.get("chain") or "solana", address, chat_id)
     return help_message(), main_menu()
 
 

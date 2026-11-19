@@ -162,17 +162,20 @@ def public_config(cfg: dict) -> dict:
 
 
 def _live_storage_ok() -> bool:
-    """Live buys are refused on an ephemeral path unless explicitly overridden.
+    """Live buys need a database that survives restart.
 
-    Render's free disk is wiped on restart. Forgetting an open buy would make
-    the next boot buy the same mint again.
+    Postgres via DATABASE_URL counts. A SQLite file under /tmp does not,
+    unless GMGN_ALLOW_EPHEMERAL_DB=1. TRADE_MODE still defaults to paper;
+    this only decides whether live mode is allowed to send a swap.
     """
     if _bool("GMGN_ALLOW_EPHEMERAL_DB", False):
         return True
-    from .store import db_path
+    from .store import storage_status
 
-    path = str(db_path())
-    return not (path == "/tmp" or path.startswith("/tmp/") or path.startswith("/var/tmp/"))
+    status = storage_status()
+    if status["backend"] == "postgres":
+        return True
+    return not status["ephemeral"]
 
 
 def _mode(name: str) -> str:

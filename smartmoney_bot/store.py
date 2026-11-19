@@ -93,6 +93,12 @@ CREATE TABLE IF NOT EXISTS subscribers (
     alerts_launch INTEGER DEFAULT 1,
     alerts_cluster INTEGER DEFAULT 1,
     alerts_pump INTEGER DEFAULT 1,
+    buy_a REAL DEFAULT 25,
+    buy_b REAL DEFAULT 50,
+    buy_c REAL DEFAULT 100,
+    tp_multiple REAL DEFAULT 2,
+    sl_multiple REAL DEFAULT 0.5,
+    copy_usd REAL DEFAULT 50,
     created_at TEXT
 );
 
@@ -157,6 +163,17 @@ PAPER_EXTRA = (
     ("exit_reason", "TEXT"),
 )
 
+# Added after subscribers already existed in the field. Fresh databases get
+# these from CREATE TABLE; older files get them here.
+SUBSCRIBER_EXTRA = (
+    ("buy_a", "REAL DEFAULT 25"),
+    ("buy_b", "REAL DEFAULT 50"),
+    ("buy_c", "REAL DEFAULT 100"),
+    ("tp_multiple", "REAL DEFAULT 2"),
+    ("sl_multiple", "REAL DEFAULT 0.5"),
+    ("copy_usd", "REAL DEFAULT 50"),
+)
+
 
 def db_path() -> Path:
     raw = os.environ.get("SMARTMONEY_DB")
@@ -170,6 +187,33 @@ def db_path() -> Path:
 
 def using_postgres() -> bool:
     return bool((os.environ.get("DATABASE_URL") or "").strip())
+
+
+def storage_status() -> dict:
+    """Which database the process will use. Never includes the connection string."""
+    if using_postgres():
+        return {"backend": "postgres", "ephemeral": False, "detail": "DATABASE_URL"}
+    path = str(db_path())
+    ephemeral = path == "/tmp" or path.startswith("/tmp/") or path.startswith("/var/tmp/")
+    return {"backend": "sqlite", "ephemeral": ephemeral, "detail": path}
+
+
+def log_storage(logger=None) -> dict:
+    import logging
+
+    status = storage_status()
+    sink = logger or logging.getLogger("smartmoney_bot.store")
+    if status["backend"] == "postgres":
+        sink.info("database backend: postgres via DATABASE_URL")
+    elif status["ephemeral"]:
+        sink.warning(
+            "database backend: sqlite at %s. This file is ephemeral; open trades, paper wallets, "
+            "watches, and user settings are lost on restart. Set DATABASE_URL to keep them.",
+            status["detail"],
+        )
+    else:
+        sink.info("database backend: sqlite at %s", status["detail"])
+    return status
 
 
 def qmark_to_percent(sql: str) -> str:
@@ -234,25 +278,44 @@ def ensure_schema(conn) -> None:
         _ensure_postgres(conn)
         return
     conn.executescript(SCHEMA)
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(paper_calls)")}
-    for name, ddl in PAPER_EXTRA:
+    _add_columns(conn, "paper_calls", PAPER_EXTRA)
+    _add_columns(conn, "subscribers", SUBSCRIBER_EXTRA)
+
+
+def _column_type(ddl: str, postgres: bool) -> str:
+    if postgres:
+        return ddl.replace("REAL", "DOUBLE PRECISION")
+    return ddl
+
+
+def _existing_columns(conn, table: str) -> set[str]:
+    if getattr(conn, "dialect", "") == "postgres":
+        rows = conn.execute(
+            """
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = ?
+            """,
+            (table,),
+        ).fetchall()
+        return {row["column_name"] for row in rows}
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {row[1] for row in rows}
+
+
+def _add_columns(conn, table: str, extras) -> None:
+    existing = _existing_columns(conn, table)
+    if not existing:
+        return
+    postgres = getattr(conn, "dialect", "") == "postgres"
+    for name, ddl in extras:
         if name not in existing:
-            conn.execute(f"ALTER TABLE paper_calls ADD COLUMN {name} {ddl}")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {_column_type(ddl, postgres)}")
 
 
 def _ensure_postgres(conn) -> None:
     conn.executescript(_postgres_schema())
-    rows = conn.execute(
-        """
-        SELECT column_name FROM information_schema.columns
-        WHERE table_name = 'paper_calls'
-        """
-    ).fetchall()
-    existing = {row["column_name"] for row in rows}
-    for name, ddl in PAPER_EXTRA:
-        pg_type = "DOUBLE PRECISION" if ddl == "REAL" else "TEXT"
-        if name not in existing:
-            conn.execute(f"ALTER TABLE paper_calls ADD COLUMN {name} {pg_type}")
+    _add_columns(conn, "paper_calls", PAPER_EXTRA)
+    _add_columns(conn, "subscribers", SUBSCRIBER_EXTRA)
     conn.commit()
 
 

@@ -33,7 +33,19 @@ GMGN condition orders cover take-profit and stop-loss. They do not cover the tim
 
 `/pause` stops new buys. It does not cancel an order GMGN already accepted. `/mode` shows the mode and cannot turn live on.
 
-Do not use live mode on Render's free plan. That disk is wiped on restart, so the bot would forget a buy and could buy the same mint again. Live buys are refused while the database file is under `/tmp` unless `GMGN_ALLOW_EPHEMERAL_DB=1`. Set `DATABASE_URL` to a Postgres connection string when subscribers, paper wallets, and referrals should survive a restart. GMGN also rejects IPv6 callers. The Blueprint sets `TRADE_MODE=paper`.
+Do not set `TRADE_MODE=live` on the free web service. Live buys are allowed when `DATABASE_URL` points at Postgres, because that database survives a restart. They are still refused while the only database is a SQLite file under `/tmp`, unless `GMGN_ALLOW_EPHEMERAL_DB=1`. The Blueprint leaves `TRADE_MODE` at `paper`. GMGN also rejects IPv6 callers.
+
+## Keep data across restarts
+
+Render's free web service disk is wiped on restart, redeploy, and spin-down. With no `DATABASE_URL`, the bot uses SQLite and logs a warning that the file is ephemeral. Subscribers, paper wallets, open trades, watches, and `/settings` then start over.
+
+To keep them, create a Postgres database and set `DATABASE_URL` to its connection string. The bot logs `database backend: postgres via DATABASE_URL` and does not print the URL. On startup it creates any missing tables and adds any missing columns, so an existing database is not wiped.
+
+- **Render:** Dashboard → New → PostgreSQL. The free instance expires after 30 days. Copy the external connection string into the bot's `DATABASE_URL`.
+- **Neon:** Create a project at [neon.tech](https://neon.tech), then copy the pooled connection string.
+- **Supabase:** Project → Project Settings → Database → URI. Use the URI that starts with `postgresql://`.
+
+The string looks like `postgresql://user:password@host:5432/dbname`. Paste it only in the host's secret env vars, not in git. `psycopg` is already in `requirements.txt`.
 
 X-account follow alerts (Netro's `/follows`) are not included. X does not offer a documented free API for "who followed these accounts" without paid access, and scraping is not a substitute.
 
@@ -41,7 +53,9 @@ X-account follow alerts (Netro's `/follows`) are not included. X does not offer 
 
 `/start` opens a button menu: safety check, paper wallet, positions, alerts, watch wallets, leaderboard, fumbles, and help. Paste a Solana or Base contract address any time for a BUY / CAUTION / SKIP card with quick-buy links. `/wallet`, `/alerts`, `/watch`, `/fumbles`, and `/leaderboard` are the same screens.
 
-Each subscriber gets a $1,000 paper wallet. Buy buttons on a token card spend $25, $50, or $100 at the quoted price, with 2x take-profit and 0.5x stop-loss. Pump alerts (2x and up) go to subscribers who left that toggle on. `/watch <address> copy` paper-copies that wallet's buys for $50.
+Each subscriber gets a $1,000 paper wallet. Buy buttons on a token card spend that person's three saved sizes, which start at $25, $50, and $100. New paper buys use that person's take-profit and stop-loss, which start at 2x and 0.5x. Open positions keep the exits they were opened with, even if `/settings` changes later. `/watch <address> copy` paper-copies buys for that person's copy size, which starts at $50.
+
+`/settings` edits those values with buttons or a typed number. Take profit has to be above 1x. Stop loss has to be above 0 and below 1x. Sizes have to be above 0 and no larger than the paper cash on hand.
 
 `/status`, `/signals`, `/scan`, `/config`, `/mode`, `/pause`, and `/resume` are still there. `status`, `signals`, and `scan` work without the slash.
 

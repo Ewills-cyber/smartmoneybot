@@ -68,7 +68,10 @@ def run_once(
 
 
 def serve(stop_flag: dict) -> None:
+    from .store import log_storage
+
     cfg = load_settings()
+    log_storage(log)
     log.info("scanner started in %s mode", cfg.get("trade_mode", "paper"))
     if cfg.get("enable_profile_stream"):
         try:

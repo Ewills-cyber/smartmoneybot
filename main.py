@@ -1,30 +1,32 @@
+"""Local entry: scanner, Telegram poller, and a terminal prompt."""
+
+from __future__ import annotations
+
+import signal
 import threading
-import time
 
 from smartmoney_bot.chat import cli_loop, telegram_loop
-from smartmoney_bot.loop import run_once
-from smartmoney_bot.settings import DEFAULTS
+from smartmoney_bot.loop import serve
+from smartmoney_bot.settings import setup_logging
+
+STOP = {"stop": False}
 
 
-def worker(stop_flag: dict) -> None:
-    interval = DEFAULTS["poll_seconds"]
-    print("worker started in paper mode. original telegram setup.")
-    while not stop_flag.get("stop"):
-        try:
-            print(run_once())
-        except Exception as exc:  # noqa: BLE001
-            print(f"cycle failed: {exc}")
-        time.sleep(interval)
+def request_stop(*_args) -> None:
+    STOP["stop"] = True
+    raise SystemExit(0)
 
 
 def main() -> None:
-    stop_flag = {"stop": False}
-    threading.Thread(target=worker, args=(stop_flag,), daemon=True).start()
-    threading.Thread(target=telegram_loop, args=(stop_flag,), daemon=True).start()
+    setup_logging()
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+    threading.Thread(target=serve, args=(STOP,), name="scanner", daemon=True).start()
+    threading.Thread(target=telegram_loop, args=(STOP,), name="telegram", daemon=True).start()
     try:
         cli_loop()
-    except (KeyboardInterrupt, EOFError):
-        stop_flag["stop"] = True
+    finally:
+        STOP["stop"] = True
 
 
 if __name__ == "__main__":

@@ -33,13 +33,19 @@ GMGN condition orders cover take-profit and stop-loss. They do not cover the tim
 
 `/pause` stops new buys. It does not cancel an order GMGN already accepted. `/mode` shows the mode and cannot turn live on.
 
-Do not use live mode on Render's free plan. That disk is wiped on restart, so the bot would forget a buy and could buy the same mint again. Live buys are refused while the database file is under `/tmp` unless `GMGN_ALLOW_EPHEMERAL_DB=1`. GMGN also rejects IPv6 callers. The Blueprint sets `TRADE_MODE=paper`.
+Do not use live mode on Render's free plan. That disk is wiped on restart, so the bot would forget a buy and could buy the same mint again. Live buys are refused while the database file is under `/tmp` unless `GMGN_ALLOW_EPHEMERAL_DB=1`. Set `DATABASE_URL` to a Postgres connection string when subscribers, paper wallets, and referrals should survive a restart. GMGN also rejects IPv6 callers. The Blueprint sets `TRADE_MODE=paper`.
+
+X-account follow alerts (Netro's `/follows`) are not included. X does not offer a documented free API for "who followed these accounts" without paid access, and scraping is not a substitute.
 
 ## Commands
 
-`/start`, `/help`, `/status`, `/signals`, `/positions`, `/scan`, `/config`, `/wallets`, `/mode`, `/pause`, `/resume`.
+`/start` opens a button menu: safety check, paper wallet, positions, alerts, watch wallets, leaderboard, fumbles, and help. Paste a Solana or Base contract address any time for a BUY / CAUTION / SKIP card with quick-buy links. `/wallet`, `/alerts`, `/watch`, `/fumbles`, and `/leaderboard` are the same screens.
 
-`status`, `signals`, `scan`, and `how are you doing` still work.
+Each subscriber gets a $1,000 paper wallet. Buy buttons on a token card spend $25, $50, or $100 at the quoted price, with 2x take-profit and 0.5x stop-loss. Pump alerts (2x and up) go to subscribers who left that toggle on. `/watch <address> copy` paper-copies that wallet's buys for $50.
+
+`/status`, `/signals`, `/scan`, `/config`, `/mode`, `/pause`, and `/resume` are still there. `status`, `signals`, and `scan` work without the slash.
+
+If `TELEGRAM_CHAT_ID` is empty, the first `/start` subscribes that chat. Env chat ids are seeded into the same table on boot so a wiped free-tier disk still alerts the owner after you set the variable. Alerts go to every subscriber, filtered by their toggles. GMGN live orders stay on `TRADE_MODE=live` and are not available from a button.
 
 ## Run it locally
 
@@ -110,7 +116,9 @@ docker run --env-file .env -e PORT=10000 -p 10000:10000 smartmoneybot
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | for Telegram | BotFather token |
-| `TELEGRAM_CHAT_ID` | for replies | One chat id, or a comma-separated list |
+| `TELEGRAM_CHAT_ID` | no | Owner chats. Seeded as subscribers. Empty means anyone can `/start` |
+| `TELEGRAM_BOT_USERNAME` | no | Username without @, used in invite links |
+| `DATABASE_URL` | no | Postgres URL. Empty uses SQLite |
 | `BIRDEYE_API_KEY` | no | Holder count and top-holder share |
 | `HELIUS_API_KEY` | no | Helius mainnet RPC |
 | `SOLANA_RPC` | no | Full RPC URL. Wins over the Helius key |
@@ -158,6 +166,8 @@ docker run --env-file .env -e PORT=10000 -p 10000:10000 smartmoneybot
 | Solana JSON-RPC | Mint and freeze authority, wallet buys | https://solana.com/docs/rpc |
 | Helius RPC | Same JSON-RPC methods, with an API key | https://www.helius.dev/docs |
 | Birdeye `GET /defi/v3/token/holder` | Holder count and top holder | https://docs.birdeye.so |
+| RugCheck token report | Solana risk flags, LP lock, top holders | https://api.rugcheck.xyz/swagger/index.html |
+| GoPlus token security | Solana mint/freeze/transfer flags; Base honeypot and sell tax | https://docs.gopluslabs.io |
 | GMGN swap and order status | Live buys and sells when `TRADE_MODE=live` | https://docs.gmgn.ai/index/gmgn-agent-api |
 
 The old pump.fun website endpoint is gone. It was an undocumented private API. DexScreener's documented profile and boost lists replace that feed.

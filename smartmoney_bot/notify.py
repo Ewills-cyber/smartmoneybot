@@ -194,24 +194,76 @@ def pnl_line(position: dict, multiple: float | None) -> str:
     return text
 
 
-def send(text: str, *, token: str | None = None, chat_ids: list[str] | None = None, session=None) -> bool:
-    """Deliver one message to every configured chat. Logs it when Telegram is unset."""
+def infer_kind(text: str) -> str:
+    head = str(text)[:120]
+    if "LIVE BUY" in head or "LIVE SELL" in head:
+        return "owners"
+    if head.startswith("<b>PAPER") or head.startswith("<b>TAKE") or head.startswith("<b>STOP") or head.startswith("<b>TIME"):
+        return "pump"
+    if "watched wallets bought" in str(text):
+        return "cluster"
+    if "NEW CALL" in head:
+        return "launch"
+    return "all"
+
+
+def send(
+    text: str,
+    *,
+    token: str | None = None,
+    chat_ids: list[str] | None = None,
+    session=None,
+    kind: str | None = None,
+    reply_markup: dict | None = None,
+) -> bool:
+    """Deliver one message. With no chat list, send to subscribers for this alert kind."""
     cfg = None
     if token is None or chat_ids is None:
         cfg = load_settings()
     token = token if token is not None else cfg.get("telegram_token")
-    chats = chat_ids if chat_ids is not None else cfg.get("telegram_chat_ids") or []
-    if not token or not chats:
+    if chat_ids is None:
+        chat_ids = _audience(kind or infer_kind(text))
+        if not chat_ids and cfg is not None:
+            chat_ids = list(cfg.get("telegram_chat_ids") or [])
+    if reply_markup is None and "NEW CALL" in str(text):
+        reply_markup = _call_keyboard(str(text))
+    if not token or not chat_ids:
         log.info("alert (no telegram):\n%s", _plain(text))
         return False
     ok = True
-    for chat in chats:
-        if not _deliver(token, chat, text, session=session):
+    for chat in chat_ids:
+        if not _deliver(token, chat, text, session=session, reply_markup=reply_markup):
             ok = False
     return ok
 
 
-def _deliver(token: str, chat: str, text: str, session=None, attempts: int = 3) -> bool:
+def _audience(kind: str) -> list[str]:
+    from .community import owner_ids, subscriber_ids
+
+    if kind == "owners":
+        return owner_ids() or subscriber_ids("all")
+    if kind == "cluster":
+        found = subscriber_ids("launch") + subscriber_ids("cluster")
+        return list(dict.fromkeys(found))
+    if kind in {"launch", "pump"}:
+        return subscriber_ids(kind)
+    return subscriber_ids("all")
+
+
+def _call_keyboard(text: str):
+    import re
+
+    from .safety import token_keyboard
+
+    match = re.search(r"<code>([^<]+)</code>", text)
+    if not match:
+        return None
+    address = match.group(1).strip()
+    chain = "base" if address.startswith("0x") else "solana"
+    return token_keyboard(chain, address)
+
+
+def _deliver(token: str, chat: str, text: str, session=None, attempts: int = 3, reply_markup: dict | None = None) -> bool:
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     sess = session or requests.Session()
     body = text[:3900]
@@ -223,6 +275,8 @@ def _deliver(token: str, chat: str, text: str, session=None, attempts: int = 3) 
         }
         if parse_mode:
             payload["parse_mode"] = parse_mode
+        if reply_markup and parse_mode == "HTML":
+            payload["reply_markup"] = reply_markup
         for attempt in range(attempts):
             try:
                 response = sess.post(url, json=payload, timeout=20)

@@ -11,7 +11,9 @@ from flask import Flask, jsonify
 
 from smartmoney_bot import __version__
 from smartmoney_bot.chat import telegram_loop
+from smartmoney_bot.community import seed_subscribers
 from smartmoney_bot.loop import serve
+from smartmoney_bot.runtime import supervise, thread_snapshot
 from smartmoney_bot.settings import load_settings, setup_logging
 from smartmoney_bot.store import count_signals, db, get_meta, paused
 from smartmoney_bot.stream import get_stream
@@ -38,8 +40,12 @@ def ensure_started() -> None:
             bool(cfg["birdeye_api_key"]),
             bool(cfg["helius_api_key"]),
         )
-        threading.Thread(target=serve, args=(STOP,), name="scanner", daemon=True).start()
-        threading.Thread(target=telegram_loop, args=(STOP,), name="telegram", daemon=True).start()
+        try:
+            seed_subscribers()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("subscriber seed failed: %s", exc)
+        threading.Thread(target=supervise, args=("scanner", serve, STOP), name="scanner", daemon=True).start()
+        threading.Thread(target=supervise, args=("telegram", telegram_loop, STOP), name="telegram", daemon=True).start()
 
 
 def request_stop(*_args) -> None:
@@ -56,7 +62,11 @@ def health_payload() -> dict:
         "version": __version__,
         "paused": False,
         "profile_stream": stream.state if stream else "off",
+        "threads": thread_snapshot(),
     }
+    threads = payload["threads"]
+    if any(state.get("error") for state in threads.values()):
+        payload["status"] = "degraded"
     try:
         payload["paused"] = paused()
         with db() as conn:

@@ -32,6 +32,10 @@ services:
         value: "0"
       - key: TRADE_MODE
         value: paper
+      - key: DATABASE_URL
+        sync: false
+      - key: TELEGRAM_BOT_USERNAME
+        sync: false
       - key: GMGN_API_KEY
         sync: false
       - key: GMGN_PRIVATE_KEY

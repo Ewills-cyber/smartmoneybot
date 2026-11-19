@@ -68,8 +68,8 @@ def run_once(
 
 
 def serve(stop_flag: dict) -> None:
-    log.info("scanner started in %s mode", cfg.get("trade_mode", "paper"))
     cfg = load_settings()
+    log.info("scanner started in %s mode", cfg.get("trade_mode", "paper"))
     if cfg.get("enable_profile_stream"):
         try:
             start_stream()
@@ -351,6 +351,13 @@ def _run_once(*, now, get, rpc_call, sender, check_token, trader=None) -> dict:
     with db() as conn:
         open_now = conn.execute("SELECT COUNT(*) AS n FROM paper_calls WHERE status = 'open'").fetchone()["n"]
 
+    try:
+        _extend_prices_for_users(best, fetch, cfg, moment)
+        personal = _user_book(best, cfg, moment, seen, rpc_call)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("user book failed: %s", redact(exc))
+        personal = []
+
     summary = {
         "paused": is_paused,
         "scanned": len([token for token in best if token and token != SOLANA_MINT]),
@@ -363,10 +370,74 @@ def _run_once(*, now, get, rpc_call, sender, check_token, trader=None) -> dict:
     deliver = sender or send
     for message in messages:
         try:
-            deliver(message)
+            if deliver is send:
+                send(message)
+            else:
+                deliver(message)
         except Exception as exc:  # noqa: BLE001
             log.warning("alert delivery failed: %s", redact(exc))
+    for chat_id, text in personal:
+        try:
+            if deliver is send:
+                send(text, chat_ids=[str(chat_id)])
+            else:
+                deliver(f"{chat_id}: {text}")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("personal alert failed: %s", redact(exc))
     return summary
+
+
+def _extend_prices_for_users(best: dict, fetch, cfg: dict, moment: datetime) -> None:
+    from .community import open_position_tokens
+
+    missing = [token for token in open_position_tokens() if token not in best][:30]
+    if not missing:
+        return
+    try:
+        raw = market.pairs_for_tokens(missing, get=fetch, chain=cfg.get("chain") or "solana")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("user price lookup failed: %s", redact(exc))
+        return
+    best.update(market.select_best_pairs(raw, moment))
+
+
+def _user_book(best: dict, cfg: dict, moment: datetime, seen: set, rpc_call) -> list[tuple[str, str]]:
+    from .community import copy_paper_buys, settle_positions, update_fumbles, watched_addresses
+
+    prices = {
+        token: {
+            "price": pair.get("price"),
+            "mcap": pair.get("mcap"),
+            "symbol": pair.get("symbol"),
+            "chain": pair.get("chain") or cfg.get("chain") or "solana",
+        }
+        for token, pair in best.items()
+    }
+    notes = []
+    try:
+        notes.extend(settle_positions(prices))
+        notes.extend(update_fumbles(prices))
+        wallets = watched_addresses(8)
+        if wallets:
+            from .checks import default_rpc_call
+            from .cluster import collect_buys
+
+            buys, signatures = collect_buys(
+                wallets,
+                rpc_url=cfg["solana_rpc"],
+                rpc_call=rpc_call or default_rpc_call,
+                window_minutes=cfg["cluster_window_minutes"],
+                now=moment,
+                seen=seen,
+                tx_budget=min(8, int(cfg.get("cluster_tx_budget") or 8)),
+            )
+            notes.extend(copy_paper_buys(buys, prices))
+            if signatures:
+                with db() as conn:
+                    remember_signatures(conn, signatures)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("user book failed: %s", redact(exc))
+    return notes
 
 
 def _refresh_live_orders(opens, known, open_count, loss, trader, moment: datetime, messages: list):

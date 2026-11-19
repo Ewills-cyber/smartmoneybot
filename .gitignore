@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+smartmoney.db
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+*.log

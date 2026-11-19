@@ -1,0 +1,32 @@
+# Render free web service. SQLite lives on the ephemeral disk and resets on restart.
+services:
+  - type: web
+    name: smartmoneybot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python web.py
+    healthCheckPath: /health
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: BIRDEYE_API_KEY
+        sync: false
+      - key: HELIUS_API_KEY
+        sync: false
+      - key: SOLANA_RPC
+        sync: false
+      - key: SMART_WALLETS
+        sync: false
+      - key: SMARTMONEY_DB
+        value: /tmp/smartmoney.db
+      - key: LOG_LEVEL
+        value: INFO
+      - key: KEEP_AWAKE
+        value: "1"
+      - key: ENABLE_PROFILE_STREAM
+        value: "1"
+      - key: REQUIRE_CLUSTER
+        value: "0"
